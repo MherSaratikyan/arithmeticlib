@@ -3,7 +3,7 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="arithmeticlib.vcxproj" />
-  <Project Path="tests/arithmeticlib.tests.vcxproj" />
-  <Project Path="client/arithmeticlib.client.vcxproj" />
+  <Project Path="arithmeticlib.vcxproj" Id="3e7da45c-5db8-4a83-8b3d-819b7084c79e" />
+  <Project Path="client/arithmeticlib.client.vcxproj" Id="a4c81f3e-2b7d-4e9a-9f60-1c2d3e4f5a6b" />
+  <Project Path="tests/arithmeticlib.tests.vcxproj" Id="7b2e4d1a-9c3f-4a56-8e21-5d0f6b7c8a91" />
 </Solution>

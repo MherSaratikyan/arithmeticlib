@@ -9,6 +9,25 @@ namespace {
 
 constexpr uint64_t HiddenBit    = 1ULL << 23;
 constexpr uint64_t MantissaMask = 0x7FFFFF;
+constexpr int32_t  InfExponent  = 0xFF;
+constexpr uint64_t QuietNanBit  = 1ULL << 22;
+
+bool isNegative(int32_t bits)
+{
+    return (static_cast<uint32_t>(bits) & 0x80000000u) != 0;
+}
+
+// The operand's bit pattern without its sign. IEEE-754 orders positive floats
+// the same way as their bit patterns, so these compare as magnitudes.
+uint32_t magnitudeBits(int32_t bits)
+{
+    return static_cast<uint32_t>(bits) & 0x7FFFFFFFu;
+}
+
+bool isZero(int32_t magnitude)
+{
+    return magnitude == 0;                    // +0 and -0 both strip to 0
+}
 
 int32_t exponentOf(int32_t bits)
 {
@@ -24,8 +43,6 @@ uint64_t mantissaOf(int32_t bits)
 // undefined in C++ (the reference C# silently masks the count to 6 bits, so
 // `x >> 70` would become `x >> 6`). An operand that is 64+ binades smaller
 // contributes nothing to the sum, so it is flushed to zero here instead.
-// Negative counts can only arise for inputs the algorithm does not support
-// (negative floats); they are treated as "no shift".
 uint64_t shiftRight(uint64_t v, int32_t n)
 {
     if (n <= 0)  return v;
@@ -77,14 +94,48 @@ float ArithmeticMachine::result() const
     return done() ? std::bit_cast<float>(r_.resultBits) : 0.0f;
 }
 
-// Unpack: split both operands into exponent and mantissa. Subtract first
-// orders them so the larger bit pattern is the minuend and remembers the sign.
+// Unpack: resolve the signs, then split both operands into exponent and
+// mantissa.
+//
+// Subtracting is adding the negated operand, and adding two numbers of unlike
+// sign is a magnitude subtraction, so each requested operation reduces to one
+// of four operations on magnitudes plus a result sign. For the additive ones
+// the operands are ordered so that |a| >= |b|: that way Align only ever has
+// to shift b right, and the result takes the sign of a.
 void ArithmeticMachine::unpack()
 {
-    if (op_ == Op::Sub && r_.bitsB > r_.bitsA) {
-        std::swap(r_.bitsA, r_.bitsB);
-        r_.negative = true;
+    r_.signA = isNegative(r_.bitsA);
+    r_.signB = isNegative(r_.bitsB);
+    if (op_ == Op::Sub)
+        r_.signB = !r_.signB;                 // a - b == a + (-b)
+
+    // From here on bitsA/bitsB hold magnitudes and the signs travel separately.
+    r_.bitsA = static_cast<int32_t>(magnitudeBits(r_.bitsA));
+    r_.bitsB = static_cast<int32_t>(magnitudeBits(r_.bitsB));
+
+    switch (op_) {
+    case Op::Add:
+    case Op::Sub:
+        r_.magOp = (r_.signA == r_.signB) ? MagOp::Add : MagOp::Sub;
+        if (r_.bitsB > r_.bitsA) {
+            std::swap(r_.bitsA, r_.bitsB);
+            std::swap(r_.signA, r_.signB);
+        }
+        r_.negative = r_.signA;
+        break;
+
+    case Op::Mul:
+    case Op::Div:
+        r_.magOp = (op_ == Op::Mul) ? MagOp::Mul : MagOp::Div;
+        r_.negative = (r_.signA != r_.signB);
+        break;
     }
+
+    if (resolveTrivialResult()) {
+        state_ = State::Pack;
+        return;
+    }
+
     r_.expA = exponentOf(r_.bitsA);
     r_.expB = exponentOf(r_.bitsB);
     r_.manA = mantissaOf(r_.bitsA);
@@ -92,35 +143,85 @@ void ArithmeticMachine::unpack()
     state_ = State::Align;
 }
 
+// Cases the ALU cannot be used for, because a zero operand has no hidden bit
+// to work with and a zero divisor has no quotient. Fills in the result fields
+// Pack reads and returns true when it has handled the operands.
+bool ArithmeticMachine::resolveTrivialResult()
+{
+    const bool zeroA = isZero(r_.bitsA);
+    const bool zeroB = isZero(r_.bitsB);
+
+    // Copies an operand through unchanged: Pack masks the mantissa to 23 bits
+    // and re-attaches the exponent, so this reproduces its bit pattern exactly.
+    const auto passThrough = [this](int32_t bits, bool sign) {
+        r_.exponent = exponentOf(bits);
+        r_.mantissa = static_cast<uint64_t>(bits) & MantissaMask;
+        r_.negative = sign;
+        return true;
+    };
+    const auto zero = [this](bool sign) {
+        r_.exponent = 0;
+        r_.mantissa = 0;
+        r_.negative = sign;
+        return true;
+    };
+
+    switch (r_.magOp) {
+    case MagOp::Add:
+        // |a| >= |b|, and both operands have the same sign, so a zero b means
+        // the result is a (and if a is zero too, it is a signed zero already).
+        if (zeroB)
+            return passThrough(r_.bitsA, r_.signA);
+        return false;
+
+    case MagOp::Sub:
+        // Equal magnitudes of unlike sign cancel. IEEE-754 gives +0 for this,
+        // whichever way round the operands were.
+        if (r_.bitsA == r_.bitsB)
+            return zero(false);
+        if (zeroB)                            // |a| > |b| == 0
+            return passThrough(r_.bitsA, r_.signA);
+        return false;
+
+    case MagOp::Mul:
+        if (zeroA || zeroB)
+            return zero(r_.negative);
+        return false;
+
+    case MagOp::Div:
+        if (zeroB) {                          // x / 0
+            r_.exponent = InfExponent;
+            r_.mantissa = zeroA ? QuietNanBit : 0;   // 0 / 0 is undefined -> NaN
+            r_.negative = zeroA ? false : r_.negative;
+            return true;
+        }
+        if (zeroA)
+            return zero(r_.negative);
+        return false;
+    }
+    return false;
+}
+
 // Align: bring the mantissas to a common scale, work out the result exponent
 // and hand the mantissas to the ALU.
 void ArithmeticMachine::align()
 {
-    switch (op_) {
-    case Op::Add:
-        if (r_.expA > r_.expB) {
-            r_.manB = shiftRight(r_.manB, r_.expA - r_.expB);
-            r_.expB = r_.expA;
-        } else if (r_.expB > r_.expA) {
-            r_.manA = shiftRight(r_.manA, r_.expB - r_.expA);
-            r_.expA = r_.expB;
-        }
-        r_.exponent = r_.expA;
-        alu_.begin(BitSerialAlu::Op::Add, r_.manA, r_.manB);
-        break;
-
-    case Op::Sub:
+    switch (r_.magOp) {
+    case MagOp::Add:
+    case MagOp::Sub:
+        // Unpack ordered the operands, so expA >= expB.
         r_.manB = shiftRight(r_.manB, r_.expA - r_.expB);
         r_.exponent = r_.expA;
-        alu_.begin(BitSerialAlu::Op::Sub, r_.manA, r_.manB);
+        alu_.begin(r_.magOp == MagOp::Add ? BitSerialAlu::Op::Add : BitSerialAlu::Op::Sub,
+                   r_.manA, r_.manB);
         break;
 
-    case Op::Mul:
+    case MagOp::Mul:
         r_.exponent = r_.expA + r_.expB - Bias;
         alu_.begin(BitSerialAlu::Op::Mul, r_.manA, r_.manB);
         break;
 
-    case Op::Div:
+    case MagOp::Div:
         r_.manA <<= 23;                       // 23 extra fraction bits for the quotient
         r_.exponent = r_.expA - r_.expB + Bias;
         alu_.begin(BitSerialAlu::Op::Div, r_.manA, r_.manB);
@@ -143,8 +244,8 @@ void ArithmeticMachine::normalize()
 {
     uint64_t& m = r_.mantissa;
 
-    switch (op_) {
-    case Op::Add:
+    switch (r_.magOp) {
+    case MagOp::Add:
         if (m & (1ULL << 24)) {              // carry out of the mantissa
             m >>= 1;
             ++r_.exponent;
@@ -152,12 +253,10 @@ void ArithmeticMachine::normalize()
         state_ = State::Pack;
         break;
 
-    case Op::Sub:
-        if (m == 0) {                        // a == b  ->  +0
-            r_.negative = false;
-            r_.exponent = 0;
-            state_ = State::Pack;
-        } else if ((m & HiddenBit) == 0) {   // one leading-zero shift per cycle
+    case MagOp::Sub:
+        // Equal magnitudes never get here (Unpack handles them), so the
+        // difference is non-zero and only needs its leading one shifted back.
+        if ((m & HiddenBit) == 0) {          // one leading-zero shift per cycle
             m <<= 1;
             --r_.exponent;
         } else {
@@ -165,7 +264,7 @@ void ArithmeticMachine::normalize()
         }
         break;
 
-    case Op::Mul:
+    case MagOp::Mul:
         if (m & (1ULL << 47)) {              // product in [2, 4): drop 24 bits
             m >>= 24;
             ++r_.exponent;
@@ -175,7 +274,7 @@ void ArithmeticMachine::normalize()
         state_ = State::Pack;
         break;
 
-    case Op::Div:
+    case MagOp::Div:
         if (m < HiddenBit) {                 // quotient in [0.5, 1)
             m <<= 1;
             --r_.exponent;
@@ -186,9 +285,13 @@ void ArithmeticMachine::normalize()
 }
 
 // Pack: sign | exponent | fraction.
+//
+// The exponent is masked to its 8 bits: an exponent that overflowed (the
+// algorithm has no overflow detection) then wraps instead of spilling into
+// the sign bit and silently negating the result.
 void ArithmeticMachine::pack()
 {
-    uint32_t bits = (static_cast<uint32_t>(r_.exponent) << 23)
+    uint32_t bits = ((static_cast<uint32_t>(r_.exponent) & 0xFFu) << 23)
                   | static_cast<uint32_t>(r_.mantissa & MantissaMask);
     if (r_.negative)
         bits |= 0x80000000u;
@@ -203,6 +306,17 @@ const char* toString(Op op)
     case Op::Sub: return "Subtract";
     case Op::Mul: return "Multiply";
     case Op::Div: return "Divide";
+    }
+    return "?";
+}
+
+const char* toString(MagOp op)
+{
+    switch (op) {
+    case MagOp::Add: return "|a|+|b|";
+    case MagOp::Sub: return "|a|-|b|";
+    case MagOp::Mul: return "|a|*|b|";
+    case MagOp::Div: return "|a|/|b|";
     }
     return "?";
 }

@@ -23,6 +23,11 @@ static_assert(static_cast<int>(State::Normalize) == ARITH_STATE_NORMALIZE);
 static_assert(static_cast<int>(State::Pack)      == ARITH_STATE_PACK);
 static_assert(static_cast<int>(State::Done)      == ARITH_STATE_DONE);
 
+static_assert(static_cast<int>(MagOp::Add) == ARITH_MAG_ADD);
+static_assert(static_cast<int>(MagOp::Sub) == ARITH_MAG_SUB);
+static_assert(static_cast<int>(MagOp::Mul) == ARITH_MAG_MUL);
+static_assert(static_cast<int>(MagOp::Div) == ARITH_MAG_DIV);
+
 static_assert(static_cast<int>(BitSerialAlu::Phase::Idle)   == ARITH_ALU_IDLE);
 static_assert(static_cast<int>(BitSerialAlu::Phase::Add)    == ARITH_ALU_ADD);
 static_assert(static_cast<int>(BitSerialAlu::Phase::Negate) == ARITH_ALU_NEGATE);
@@ -130,10 +135,13 @@ void arith_machine_registers(const ArithMachine* m, ArithRegisters* out)
 
     out->bits_a      = r.bitsA;
     out->bits_b      = r.bitsB;
+    out->sign_a      = r.signA ? 1 : 0;
+    out->sign_b      = r.signB ? 1 : 0;
     out->exp_a       = r.expA;
     out->exp_b       = r.expB;
     out->man_a       = r.manA;
     out->man_b       = r.manB;
+    out->mag_op      = static_cast<ArithMagOp>(r.magOp);
     out->mantissa    = r.mantissa;
     out->exponent    = r.exponent;
     out->negative    = r.negative ? 1 : 0;
@@ -154,6 +162,13 @@ const char* arith_op_name(ArithOp op)
     if (op < ARITH_OP_ADD || op > ARITH_OP_DIV)
         return "?";
     return toString(toOp(op));
+}
+
+const char* arith_mag_op_name(ArithMagOp op)
+{
+    if (op < ARITH_MAG_ADD || op > ARITH_MAG_DIV)
+        return "?";
+    return toString(static_cast<MagOp>(op));
 }
 
 const char* arith_state_name(ArithState s)

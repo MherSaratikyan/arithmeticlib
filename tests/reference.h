@@ -1,8 +1,11 @@
 // reference.h : line-for-line transliteration of the C# ArithmeticModule.
 //
-// This is the specification the DLL is tested against. It is deliberately
-// *not* a state machine and keeps the C# semantics, including the masked
-// shift count (`ulong >> n` in C# shifts by `n & 63`).
+// The four Add/Subtract/Multiply/Divide functions are the C# original and so
+// handle positive magnitudes only; a signed layer on top (AddSigned, ...)
+// adds the sign rules. Together they are the specification the DLL is tested
+// against. The transliteration is deliberately *not* a state machine and keeps
+// the C# semantics, including the masked shift count (`ulong >> n` in C#
+// shifts by `n & 63`).
 #pragma once
 
 #include <bit>
@@ -192,6 +195,74 @@ inline float Divide(float a, float b)
     }
 
     return MakeFloat(exponent, result);
+}
+// ---------------------------------------------------------------------------
+// Signed layer.
+//
+// The four functions above are the C# original and operate on positive
+// magnitudes. The sign rules below are written independently of the DLL's
+// state machine - decide the sign here, delegate the magnitude to the
+// original code - so the two implementations can be compared.
+
+inline bool  SignOf(float f)      { return (std::bit_cast<uint32_t>(f) >> 31) != 0; }
+inline bool  IsZero(float f)      { return (std::bit_cast<uint32_t>(f) & 0x7FFFFFFFu) == 0; }
+inline float MagnitudeOf(float f) { return std::bit_cast<float>(std::bit_cast<uint32_t>(f) & 0x7FFFFFFFu); }
+inline float Negate(float f)      { return std::bit_cast<float>(std::bit_cast<uint32_t>(f) ^ 0x80000000u); }
+
+inline float WithSign(float magnitude, bool negative)
+{
+    uint32_t bits = std::bit_cast<uint32_t>(magnitude) & 0x7FFFFFFFu;
+    if (negative)
+        bits |= 0x80000000u;
+    return std::bit_cast<float>(bits);
+}
+
+inline float Zero(bool negative)     { return WithSign(0.0f, negative); }
+inline float Infinity(bool negative) { return WithSign(std::bit_cast<float>(0x7F800000u), negative); }
+inline float QuietNan()              { return std::bit_cast<float>(0x7FC00000u); }
+
+inline float AddSigned(float a, float b)
+{
+    const bool  signA = SignOf(a),      signB = SignOf(b);
+    const float magA  = MagnitudeOf(a), magB  = MagnitudeOf(b);
+
+    if (signA == signB) {                       // like signs: magnitudes add
+        if (IsZero(a)) return WithSign(magB, signA);
+        if (IsZero(b)) return WithSign(magA, signA);
+        return WithSign(Add(magA, magB), signA);
+    }
+
+    // Unlike signs: magnitudes subtract and the larger one keeps its sign.
+    const uint32_t bitsA = std::bit_cast<uint32_t>(magA);
+    const uint32_t bitsB = std::bit_cast<uint32_t>(magB);
+    if (bitsA == bitsB)
+        return Zero(false);                     // cancellation -> +0
+    if (bitsA > bitsB)
+        return IsZero(b) ? WithSign(magA, signA) : WithSign(Subtract(magA, magB), signA);
+    return IsZero(a) ? WithSign(magB, signB) : WithSign(Subtract(magB, magA), signB);
+}
+
+inline float SubtractSigned(float a, float b)
+{
+    return AddSigned(a, Negate(b));             // a - b == a + (-b)
+}
+
+inline float MultiplySigned(float a, float b)
+{
+    const bool negative = SignOf(a) != SignOf(b);
+    if (IsZero(a) || IsZero(b))
+        return Zero(negative);
+    return WithSign(Multiply(MagnitudeOf(a), MagnitudeOf(b)), negative);
+}
+
+inline float DivideSigned(float a, float b)
+{
+    const bool negative = SignOf(a) != SignOf(b);
+    if (IsZero(b))
+        return IsZero(a) ? QuietNan() : Infinity(negative);
+    if (IsZero(a))
+        return Zero(negative);
+    return WithSign(Divide(MagnitudeOf(a), MagnitudeOf(b)), negative);
 }
 
 } // namespace reference

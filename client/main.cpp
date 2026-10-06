@@ -6,6 +6,7 @@
 #include <arithmeticlib.h>
 
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -64,9 +65,15 @@ void printResult(ArithOp op, float a, float b)
     std::printf("  %s: %.9g %s %.9g\n", arith_op_name(op), a, opSymbol(op), b);
     std::printf("    arithmeticlib : %-15.9g  0x%08X\n", r, bitsOf(r));
     std::printf("    native IEEE   : %-15.9g  0x%08X\n", n, bitsOf(n));
-    if (bitsOf(r) != bitsOf(n))
-        std::printf("    (differs by %ld ulp: the algorithm truncates instead of rounding)\n",
-                    static_cast<long>(bitsOf(n)) - static_cast<long>(bitsOf(r)));
+    if (bitsOf(r) != bitsOf(n)) {
+        if (std::isnan(r) && std::isnan(n))
+            std::printf("    (both NaN; the sign and payload of a NaN carry no meaning)\n");
+        else if (!std::isfinite(r) || !std::isfinite(n))
+            std::printf("    (results differ)\n");
+        else
+            std::printf("    (differs by %ld ulp: the algorithm truncates instead of rounding)\n",
+                        static_cast<long>(bitsOf(n)) - static_cast<long>(bitsOf(r)));
+    }
 }
 
 void printTrace(ArithOp op, float a, float b)
@@ -95,6 +102,16 @@ void printTrace(ArithOp op, float a, float b)
                     static_cast<unsigned long long>(r.alu_b),
                     static_cast<unsigned long long>(r.alu_rem));
         arith_machine_step(m);
+
+        if (s == ARITH_STATE_UNPACK) {
+            // Unpack has just resolved the signs: show what the machine will
+            // actually compute, since a + b can become a magnitude subtraction.
+            ArithRegisters d{};
+            arith_machine_registers(m, &d);
+            std::printf("         signs: a %c, b %c  ->  computes %s, result %c\n",
+                        d.sign_a ? '-' : '+', d.sign_b ? '-' : '+',
+                        arith_mag_op_name(d.mag_op), d.negative ? '-' : '+');
+        }
     }
 
     ArithRegisters r{};
@@ -161,6 +178,8 @@ int main(int argc, char** argv)
                 usage();
                 return 0;
             }
+            if (std::strcmp(argv[i], "--") == 0)
+                continue;                      // end-of-options separator
             line += argv[i];
             line += ' ';
         }

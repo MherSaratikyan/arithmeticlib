@@ -44,6 +44,13 @@ inline float randomNormal(Rng& rng, int32_t expLo, int32_t expHi)
     return makeFloat(rng.between(expLo, expHi), static_cast<uint32_t>(rng.next()));
 }
 
+// Same, with a random sign.
+inline float randomSigned(Rng& rng, int32_t expLo, int32_t expHi)
+{
+    const float magnitude = randomNormal(rng, expLo, expHi);
+    return (rng.next() & 1) ? -magnitude : magnitude;
+}
+
 // RAII wrapper around an ArithMachine so a failing CHECK never leaks one.
 struct Machine {
     ArithMachine* m;

@@ -91,6 +91,10 @@ TEST(names_are_human_readable)
     CHECK(std::strcmp(arith_op_name(ARITH_OP_DIV), "Divide") == 0);
     CHECK(std::strcmp(arith_op_name(static_cast<ArithOp>(99)), "?") == 0);
 
+    CHECK(std::strcmp(arith_mag_op_name(ARITH_MAG_ADD), "|a|+|b|") == 0);
+    CHECK(std::strcmp(arith_mag_op_name(ARITH_MAG_DIV), "|a|/|b|") == 0);
+    CHECK(std::strcmp(arith_mag_op_name(static_cast<ArithMagOp>(7)), "?") == 0);
+
     CHECK(std::strcmp(arith_state_name(ARITH_STATE_UNPACK), "Unpack") == 0);
     CHECK(std::strcmp(arith_state_name(ARITH_STATE_COMPUTE), "Compute") == 0);
     CHECK(std::strcmp(arith_state_name(ARITH_STATE_DONE), "Done") == 0);

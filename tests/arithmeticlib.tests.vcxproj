@@ -108,6 +108,7 @@
     <ClCompile Include="test_machine_states.cpp" />
     <ClCompile Include="test_main.cpp" />
     <ClCompile Include="test_mul_div.cpp" />
+    <ClCompile Include="test_signs.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="reference.h" />

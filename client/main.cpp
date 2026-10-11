@@ -13,6 +13,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <omp.h>
 
 namespace {
 
@@ -86,7 +87,7 @@ void printTrace(ArithOp op, float a, float b)
 
     std::printf("  %s: %.9g %s %.9g\n\n", arith_op_name(op), a, opSymbol(op), b);
     std::printf("  cycle  state      alu     exp  %-18s %-18s %-18s %s\n",
-                "mantissa/acc", "alu a", "alu b", "remainder");
+        "mantissa/acc", "alu a", "alu b", "remainder");
 
     while (!arith_machine_is_done(m)) {
         ArithRegisters r{};
@@ -94,13 +95,13 @@ void printTrace(ArithOp op, float a, float b)
         const ArithState s = arith_machine_state(m);
 
         std::printf("  %5u  %-9s  %-6s  %3d  0x%016llX 0x%016llX 0x%016llX 0x%llX\n",
-                    arith_machine_cycles(m), arith_state_name(s), arith_alu_phase_name(r.alu_phase),
-                    r.exponent,
-                    s == ARITH_STATE_COMPUTE ? static_cast<unsigned long long>(r.alu_acc)
-                                             : static_cast<unsigned long long>(r.mantissa),
-                    static_cast<unsigned long long>(r.alu_a),
-                    static_cast<unsigned long long>(r.alu_b),
-                    static_cast<unsigned long long>(r.alu_rem));
+            arith_machine_cycles(m), arith_state_name(s), arith_alu_phase_name(r.alu_phase),
+            r.exponent,
+            s == ARITH_STATE_COMPUTE ? static_cast<unsigned long long>(r.alu_acc)
+            : static_cast<unsigned long long>(r.mantissa),
+            static_cast<unsigned long long>(r.alu_a),
+            static_cast<unsigned long long>(r.alu_b),
+            static_cast<unsigned long long>(r.alu_rem));
         arith_machine_step(m);
 
         if (s == ARITH_STATE_UNPACK) {
@@ -109,17 +110,17 @@ void printTrace(ArithOp op, float a, float b)
             ArithRegisters d{};
             arith_machine_registers(m, &d);
             std::printf("         signs: a %c, b %c  ->  computes %s, result %c\n",
-                        d.sign_a ? '-' : '+', d.sign_b ? '-' : '+',
-                        arith_mag_op_name(d.mag_op), d.negative ? '-' : '+');
+                d.sign_a ? '-' : '+', d.sign_b ? '-' : '+',
+                arith_mag_op_name(d.mag_op), d.negative ? '-' : '+');
         }
     }
 
     ArithRegisters r{};
     arith_machine_registers(m, &r);
     std::printf("  %5u  %-9s  sign=%d exp=%d mantissa=0x%06llX  ->  %.9g (0x%08X)\n\n",
-                arith_machine_cycles(m), arith_state_name(arith_machine_state(m)),
-                r.negative, r.exponent, static_cast<unsigned long long>(r.mantissa & 0x7FFFFF),
-                arith_machine_result(m), r.result_bits);
+        arith_machine_cycles(m), arith_state_name(arith_machine_state(m)),
+        r.negative, r.exponent, static_cast<unsigned long long>(r.mantissa & 0x7FFFFF),
+        arith_machine_result(m), r.result_bits);
 
     arith_machine_destroy(m);
 }
@@ -200,8 +201,17 @@ int main(int argc, char** argv)
         line = tidy(line);
         if (line == "q" || line == "quit" || line == "exit")
             break;
-        if (!evaluate(line))
-            std::printf("  could not parse; expected: [trace] a op b\n");
+
+		double start = omp_get_wtime();
+#pragma omp parallel
+		{
+			if (!evaluate(line)) {
+				std::printf("  invalid expression\n");
+			}
+		}
+
+
+
     }
     return 0;
 }

@@ -5,6 +5,10 @@
 
 #include <new>
 
+#ifdef _OPENMP
+#  include <omp.h>
+#endif
+
 using namespace arith;
 
 // The opaque handle handed out to C callers.
@@ -46,12 +50,45 @@ Op toOp(ArithOp op)
     }
 }
 
+BitSerialAlu::Op toAluOp(ArithOp op)
+{
+    switch (op) {
+    case ARITH_OP_SUB: return BitSerialAlu::Op::Sub;
+    case ARITH_OP_MUL: return BitSerialAlu::Op::Mul;
+    case ARITH_OP_DIV: return BitSerialAlu::Op::Div;
+    case ARITH_OP_ADD:
+    default:           return BitSerialAlu::Op::Add;
+    }
+}
+
 uint64_t runAlu(BitSerialAlu::Op op, uint64_t a, uint64_t b)
 {
     BitSerialAlu alu;
     alu.begin(op, a, b);
     while (!alu.step()) {}
     return alu.result();
+}
+
+// Below this many elements, handing work to other threads costs more than
+// doing it here. One float operation is a few dozen ALU cycles, so the
+// cross-over sits in the low thousands.
+constexpr size_t kParallelThreshold = 2048;
+
+// Runs body(i) for i in [0, n), split across threads once the batch is big
+// enough to pay for them. Every element is written by exactly one thread and
+// reads only its own inputs, so no synchronisation is needed and the result
+// does not depend on the schedule.
+//
+// The index is signed because MSVC's /openmp implements OpenMP 2.0, which
+// requires a signed loop counter.
+template <class Body>
+void parallelFor(size_t n, Body body)
+{
+    const ptrdiff_t count = static_cast<ptrdiff_t>(n);
+#pragma omp parallel for schedule(static) \
+        if (count >= static_cast<ptrdiff_t>(kParallelThreshold))
+    for (ptrdiff_t i = 0; i < count; ++i)
+        body(static_cast<size_t>(i));
 }
 
 } // namespace
@@ -76,6 +113,72 @@ uint64_t arith_add_bits(uint64_t a, uint64_t b) { return runAlu(BitSerialAlu::Op
 uint64_t arith_sub_bits(uint64_t a, uint64_t b) { return runAlu(BitSerialAlu::Op::Sub, a, b); }
 uint64_t arith_mul_bits(uint64_t a, uint64_t b) { return runAlu(BitSerialAlu::Op::Mul, a, b); }
 uint64_t arith_div_bits(uint64_t a, uint64_t b) { return runAlu(BitSerialAlu::Op::Div, a, b); }
+
+/* --- Batch operations ---------------------------------------------------- */
+
+void arith_compute_array(ArithOp op, const float* a, const float* b, float* out, size_t n)
+{
+    if (!a || !b || !out)
+        return;
+    const Op internal = toOp(op);
+    parallelFor(n, [=](size_t i) {
+        out[i] = ArithmeticMachine(internal, a[i], b[i]).run();
+    });
+}
+
+void arith_compute_array_scalar(ArithOp op, const float* a, float b, float* out, size_t n)
+{
+    if (!a || !out)
+        return;
+    const Op internal = toOp(op);
+    parallelFor(n, [=](size_t i) {
+        out[i] = ArithmeticMachine(internal, a[i], b).run();
+    });
+}
+
+void arith_bits_array(ArithOp op, const uint64_t* a, const uint64_t* b, uint64_t* out, size_t n)
+{
+    if (!a || !b || !out)
+        return;
+    const BitSerialAlu::Op aluOp = toAluOp(op);
+    parallelFor(n, [=](size_t i) {
+        out[i] = runAlu(aluOp, a[i], b[i]);
+    });
+}
+
+/* --- Parallel runtime ---------------------------------------------------- */
+
+int arith_parallel_available(void)
+{
+#ifdef _OPENMP
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int arith_parallel_threads(void)
+{
+#ifdef _OPENMP
+    return omp_get_max_threads();
+#else
+    return 1;
+#endif
+}
+
+void arith_parallel_set_threads(int n)
+{
+#ifdef _OPENMP
+    omp_set_num_threads(n > 0 ? n : omp_get_num_procs());
+#else
+    (void)n;
+#endif
+}
+
+size_t arith_parallel_threshold(void)
+{
+    return kParallelThreshold;
+}
 
 /* --- Stepwise state machine ---------------------------------------------- */
 

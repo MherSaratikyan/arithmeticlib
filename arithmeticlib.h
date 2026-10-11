@@ -10,6 +10,7 @@
 // interpreted; x / 0 does produce the IEEE result (+-inf, or NaN for 0 / 0).
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef ARITHMETICLIB_EXPORTS
@@ -97,6 +98,29 @@ ARITHMETICLIB_API uint64_t arith_add_bits(uint64_t a, uint64_t b);
 ARITHMETICLIB_API uint64_t arith_sub_bits(uint64_t a, uint64_t b);
 ARITHMETICLIB_API uint64_t arith_mul_bits(uint64_t a, uint64_t b);
 ARITHMETICLIB_API uint64_t arith_div_bits(uint64_t a, uint64_t b);
+
+/* --- Batch operations ----------------------------------------------------
+   Element i is computed from a[i] and b[i] only, so these are split across
+   OpenMP threads. The result of each element is independent of how the work
+   was scheduled, so a batch is bitwise identical to the same operations run
+   one at a time, whatever the thread count. `out` may alias `a` or `b` for
+   an in-place update. Nothing happens for n == 0 or a NULL pointer.
+   The cycles *within* one operation are a dependency chain and stay
+   sequential - see the Parallelism section of README.md.               */
+ARITHMETICLIB_API void arith_compute_array(ArithOp op, const float* a, const float* b,
+                                           float* out, size_t n);
+/* Same, with b held constant: out[i] = a[i] op b. */
+ARITHMETICLIB_API void arith_compute_array_scalar(ArithOp op, const float* a, float b,
+                                                  float* out, size_t n);
+/* The integer primitives over arrays. */
+ARITHMETICLIB_API void arith_bits_array(ArithOp op, const uint64_t* a, const uint64_t* b,
+                                        uint64_t* out, size_t n);
+
+/* --- Parallel runtime ----------------------------------------------------- */
+ARITHMETICLIB_API int    arith_parallel_available(void);   /* 1 if built with OpenMP      */
+ARITHMETICLIB_API int    arith_parallel_threads(void);      /* threads the next batch gets */
+ARITHMETICLIB_API void   arith_parallel_set_threads(int n); /* n <= 0 restores the default */
+ARITHMETICLIB_API size_t arith_parallel_threshold(void);    /* batches below n run serially */
 
 /* --- Stepwise state machine ---------------------------------------------- */
 ARITHMETICLIB_API ArithMachine* arith_machine_create(ArithOp op, float a, float b);

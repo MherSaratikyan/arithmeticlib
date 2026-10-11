@@ -2,6 +2,7 @@
 //
 //   arithmeticlib.client 1.5 + 2.25          one-shot result, compared with native IEEE-754
 //   arithmeticlib.client --trace 1 / 3       clock the state machine and print every cycle
+//   arithmeticlib.client --bench 2000000 *   time a batch on one thread vs all of them
 //   arithmeticlib.client                     interactive: "a op b", "trace a op b", "q"
 #include <arithmeticlib.h>
 
@@ -13,11 +14,27 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <omp.h>
+#include <vector>
+
+#ifdef _OPENMP
+#  include <omp.h>
+#else
+#  include <chrono>
+#endif
 
 namespace {
 
 uint32_t bitsOf(float f) { return std::bit_cast<uint32_t>(f); }
+
+double seconds()
+{
+#ifdef _OPENMP
+    return omp_get_wtime();
+#else
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+#endif
+}
 
 bool parseOp(const std::string& s, ArithOp& op)
 {
@@ -162,16 +179,82 @@ bool evaluate(const std::string& rawLine)
     return true;
 }
 
+// Times one operation over a large batch, once on a single thread and once on
+// all of them, and checks the two runs agree bit for bit.
+void printBench(ArithOp op, size_t n)
+{
+    std::printf("  %s over %zu values, OpenMP %s\n", arith_op_name(op), n,
+                arith_parallel_available() ? "on" : "off (built without /openmp)");
+
+    std::vector<float> a(n), b(n), serial(n), parallel(n);
+    uint64_t state = 0x2545F4914F6CDD1Dull;
+    for (size_t i = 0; i < n; ++i) {
+        // xorshift64, inline: operands in a range where no exponent overflows.
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+        a[i] = std::bit_cast<float>((static_cast<uint32_t>(state) & 0x807FFFFFu) | (120u << 23));
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+        b[i] = std::bit_cast<float>((static_cast<uint32_t>(state) & 0x807FFFFFu) | (124u << 23));
+    }
+
+    const int threads = arith_parallel_threads();
+
+    arith_parallel_set_threads(1);
+    const double t0 = seconds();
+    arith_compute_array(op, a.data(), b.data(), serial.data(), n);
+    const double oneThread = seconds() - t0;
+
+    arith_parallel_set_threads(threads);
+    const double t1 = seconds();
+    arith_compute_array(op, a.data(), b.data(), parallel.data(), n);
+    const double allThreads = seconds() - t1;
+
+    size_t mismatches = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (bitsOf(serial[i]) != bitsOf(parallel[i]))
+            ++mismatches;
+
+    std::printf("    1 thread    : %8.3f ms\n", oneThread * 1000.0);
+    std::printf("    %2d threads  : %8.3f ms   (%.2fx)\n", threads, allThreads * 1000.0,
+                allThreads > 0.0 ? oneThread / allThreads : 0.0);
+    std::printf("    results     : %s\n",
+                mismatches == 0 ? "identical, bit for bit"
+                                : "DIFFER - the batch is not deterministic");
+}
+
 void usage()
 {
     std::printf("usage: arithmeticlib.client [--trace] <a> <+|-|*|/> <b>\n"
+                "       arithmeticlib.client --bench [count] [op]\n"
                 "       arithmeticlib.client            (interactive)\n");
+}
+
+// Handles "--bench [count] [op]"; returns false if this is not a bench request.
+bool tryBench(int argc, char** argv)
+{
+    if (argc < 2 || std::strcmp(argv[1], "--bench") != 0)
+        return false;
+
+    size_t n = 2000000;
+    ArithOp op = ARITH_OP_MUL;
+    if (argc > 2) {
+        const long long requested = std::atoll(argv[2]);
+        if (requested > 0)
+            n = static_cast<size_t>(requested);
+    }
+    if (argc > 3)
+        parseOp(argv[3], op);
+
+    printBench(op, n);
+    return true;
 }
 
 } // namespace
 
 int main(int argc, char** argv)
 {
+    if (tryBench(argc, argv))
+        return 0;
+
     if (argc > 1) {
         std::string line;
         for (int i = 1; i < argc; ++i) {
@@ -202,16 +285,12 @@ int main(int argc, char** argv)
         if (line == "q" || line == "quit" || line == "exit")
             break;
 
-		double start = omp_get_wtime();
-#pragma omp parallel
-		{
-			if (!evaluate(line)) {
-				std::printf("  invalid expression\n");
-			}
-		}
-
-
-
+        // One expression is one operation: there is nothing here to split
+        // across threads (`#pragma omp parallel` would just make every thread
+        // print the same answer). Parallelism lives in the batch API, which
+        // `--bench` exercises.
+        if (!evaluate(line))
+            std::printf("  could not parse; expected: [trace] a op b\n");
     }
     return 0;
 }

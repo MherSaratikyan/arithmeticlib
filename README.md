@@ -3,8 +3,9 @@
 Software floating-point **add / subtract / multiply / divide** for IEEE-754
 `float`, built purely from bitwise operations and driven by an explicit
 **state machine**. Operands may be **positive or negative**, including signed
-zero. A C++ port of the C# `ArithmeticModule`, packaged as a Windows DLL with
-a C API, a test suite and a console client.
+zero, and batches of them run across **OpenMP** threads. A C++ port of the C#
+`ArithmeticModule`, packaged as a Windows DLL with a C API, a test suite and a
+console client.
 
 ```
 arithmeticlib/
@@ -16,7 +17,7 @@ arithmeticlib/
 │   └── bit_serial_alu.h/.cpp     AddBits/SubBits/MulBits/DivBits as a clocked sub-machine
 ├── tests/                        console test runner (no external dependencies)
 │   ├── reference.h               transliterated C# module + sign rules = the oracle
-│   └── test_*.cpp                60 tests
+│   └── test_*.cpp                68 tests
 └── client/                       console client: one-shot results and cycle-by-cycle traces
 ```
 
@@ -95,6 +96,9 @@ float arith_compute(ArithOp op, float a, float b);
 // integer primitives (run to completion)
 uint64_t arith_add_bits(uint64_t a, uint64_t b);   // also sub/mul/div
 
+// batches, split across OpenMP threads (see Parallelism)
+void arith_compute_array(ArithOp op, const float* a, const float* b, float* out, size_t n);
+
 // stepwise
 ArithMachine* m = arith_machine_create(ARITH_OP_DIV, -1.0f, 3.0f);
 while (!arith_machine_step(m)) {
@@ -115,6 +119,74 @@ convention, so the DLL is consumable from C, C++ and via P/Invoke:
 static extern float arith_divide(float a, float b);
 ```
 
+## Parallelism
+
+The bit-serial cycles cannot be parallelised: each one consumes the registers
+the one before it produced. A carry ripple needs the previous carry, `MulBits`
+accumulates into a running product, and restoring division carries a remainder
+from bit to bit. `#pragma omp parallel for` on any of those loops gives wrong
+answers, and `#pragma omp parallel` around a single operation only makes every
+thread compute the same result. (Parallel adders do exist — carry-lookahead,
+carry-select — but they are a different algorithm, not a directive on this
+one.)
+
+What *is* independent is one operation from the next, so that is where OpenMP
+goes. The batch entry points walk their arrays under
+
+```c
+#pragma omp parallel for schedule(static) if (count >= threshold)
+```
+
+Each element builds its own machine on the stack and touches only `a[i]`,
+`b[i]` and `out[i]`, so there is nothing to synchronise and no reduction to
+order:
+
+```c
+arith_compute_array(ARITH_OP_MUL, a, b, out, n);         // split across threads
+arith_compute_array_scalar(ARITH_OP_MUL, a, 2.0f, out, n);
+arith_bits_array(ARITH_OP_DIV, x, y, q, n);              // integer primitives
+```
+
+* **Deterministic.** A batch is bitwise identical to the same operations run
+  one at a time, on any thread count — `test_parallel.cpp` checks both.
+* **Thread-safe by construction.** The DLL keeps no mutable global state, so
+  one-shot calls and `ArithMachine` handles can be used from several threads at
+  once. `arith_parallel_set_threads` is the exception: it sets an OpenMP
+  setting for the calling thread.
+* **In-place is fine.** `out` may alias `a` or `b`; every index is written by
+  exactly one thread.
+* **Small batches stay serial.** Below `arith_parallel_threshold()` (2048
+  elements) the work is cheaper than waking the thread team, so the `if` clause
+  keeps it on the calling thread.
+
+Thread count comes from OpenMP: set `OMP_NUM_THREADS`, or call
+`arith_parallel_set_threads(n)` (`n <= 0` restores the default).
+`arith_parallel_threads()` reports what the next batch will use, and
+`arith_parallel_available()` says whether the DLL was built with `/openmp` at
+all — the batch functions work either way.
+
+`--bench` measures it; on an 8-thread machine:
+
+```
+  Multiply over 2000000 values, OpenMP on
+    1 thread    : 1525.164 ms
+     8 threads  :  350.294 ms   (4.35x)
+    results     : identical, bit for bit
+
+  Divide over 3000000 values, OpenMP on
+    1 thread    : 5582.300 ms
+     8 threads  : 1019.296 ms   (5.48x)
+    results     : identical, bit for bit
+```
+
+Division is the slowest operation (64 ALU cycles per value) and scales best.
+
+**Runtime dependency:** `/openmp` makes the DLL need `vcomp140.dll`
+(`vcomp140d.dll` in a debug build), part of the Visual C++ redistributable and
+not always already installed. The build copies the matching one out of the
+toolset into the output folder, so `bin\<Platform>\<Configuration>\` is
+self-contained — ship it next to `arithmeticlib.dll`.
+
 ## Building
 
 Open `arithmeticlib.slnx` in Visual Studio 2026 (v145 toolset) and build, or
@@ -133,7 +205,8 @@ configurations.
 A DLL needs three things to be usable: the **header** (declarations), the
 **import library** `arithmeticlib.lib` (what the linker binds against) and the
 **`arithmeticlib.dll`** itself (loaded at run time, so it must sit next to
-your `.exe`). Pick whichever route matches your project.
+your `.exe`) — plus **`vcomp140.dll`**, the OpenMP runtime the build drops in
+the same folder. Pick whichever route matches your project.
 
 **From a C++ project inside this solution** — the way `tests/` and `client/`
 do it, and the one that needs no manual copying:
@@ -152,8 +225,8 @@ do it, and the one that needs no manual copying:
 
 1. Build the DLL: `msbuild arithmeticlib.vcxproj /p:Configuration=Release
    /p:Platform=x64`.
-2. Copy `arithmeticlib.h` and, from `bin\x64\Release\`, `arithmeticlib.lib`
-   and `arithmeticlib.dll` into your project.
+2. Copy `arithmeticlib.h` and, from `bin\x64\Release\`, `arithmeticlib.lib`,
+   `arithmeticlib.dll` and `vcomp140.dll` into your project.
 3. In your project: **C/C++ → Additional Include Directories** → the folder
    holding the header; **Linker → Input → Additional Dependencies** → add
    `arithmeticlib.lib`; **Linker → General → Additional Library Directories**
@@ -195,11 +268,11 @@ fine and any failure is in your own project's settings.
 ## Tests
 
 ```bat
-bin\x64\Release\arithmeticlib.tests.exe            # all 60 tests
+bin\x64\Release\arithmeticlib.tests.exe            # all 68 tests
 bin\x64\Release\arithmeticlib.tests.exe sign       # only tests whose name contains "sign"
 ```
 
-The suite checks four things:
+The suite checks five things:
 
 * **Primitives** – `arith_*_bits` against native 64-bit integer arithmetic and
   against the reference, including wrap-around and division by zero.
@@ -216,6 +289,9 @@ The suite checks four things:
   divide, 2 for a trivial result), ALU phases (`Negate` then `Add` for a
   magnitude subtraction), the sign and `mag_op` registers, reset, stepping
   past `Done`, null handles.
+* **Batches** – results identical to the scalar functions above and below the
+  parallel threshold and across thread counts, in-place updates, the `n == 0`
+  and NULL cases, and the OpenMP runtime hooks.
 
 Exit code is 0 when everything passes.
 
@@ -243,6 +319,14 @@ Exit code is 0 when everything passes.
      67  Normalize  Done    126  0x0000000000C00000 0x0000000000300000 0x0000000000000000 0x0
      68  Pack       Done    126  0x0000000000C00000 0x0000000000300000 0x0000000000000000 0x0
      69  Done       sign=0 exp=126 mantissa=0x400000  ->  0.75 (0x3F400000)
+```
+
+```
+> bin\x64\Release\arithmeticlib.client.exe --bench 2000000 *
+  Multiply over 2000000 values, OpenMP on
+    1 thread    : 1525.164 ms
+     8 threads  :  350.294 ms   (4.35x)
+    results     : identical, bit for bit
 ```
 
 Run it without arguments for an interactive prompt (`a op b`,

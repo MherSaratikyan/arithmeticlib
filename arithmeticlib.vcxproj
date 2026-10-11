@@ -83,6 +83,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -104,6 +105,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -123,6 +125,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -144,6 +147,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -176,4 +180,29 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <!-- /openmp makes this DLL depend on the OpenMP runtime: vcomp140.dll, or
+       vcomp140d.dll for a debug build. It ships with the Visual C++
+       redistributable and is not always installed, so the copy that comes
+       with the toolset is placed next to the binaries. Failing to find it
+       only costs the copy; a system-wide install still works. -->
+  <PropertyGroup>
+    <OpenMPRedistArch Condition="'$(Platform)' == 'Win32'">x86</OpenMPRedistArch>
+    <OpenMPRedistArch Condition="'$(Platform)' != 'Win32'">x64</OpenMPRedistArch>
+    <OpenMPRedistRoot>$(VCInstallDir)Redist\MSVC\</OpenMPRedistRoot>
+    <OpenMPRedistLeaf Condition="'$(UseDebugLibraries)' == 'true'">debug_nonredist\$(OpenMPRedistArch)\Microsoft.VC*.DebugOpenMP</OpenMPRedistLeaf>
+    <OpenMPRedistLeaf Condition="'$(UseDebugLibraries)' != 'true'">$(OpenMPRedistArch)\Microsoft.VC*.OpenMP</OpenMPRedistLeaf>
+  </PropertyGroup>
+  <Target Name="CopyOpenMPRuntime" AfterTargets="Build">
+    <ItemGroup>
+      <!-- The redistributable is usually versioned like the toolset; fall back
+           to any version present if it is not. -->
+      <OpenMPRuntime Include="$(OpenMPRedistRoot)$(VCToolsVersion)\$(OpenMPRedistLeaf)\vcomp*.dll" />
+      <OpenMPRuntime Condition="'@(OpenMPRuntime)' == ''"
+                     Include="$(OpenMPRedistRoot)*\$(OpenMPRedistLeaf)\vcomp*.dll" />
+    </ItemGroup>
+    <Copy Condition="'@(OpenMPRuntime)' != ''" SourceFiles="@(OpenMPRuntime)"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Message Condition="'@(OpenMPRuntime)' == ''" Importance="high"
+             Text="OpenMP runtime not found under $(OpenMPRedistRoot); relying on a system-wide copy." />
+  </Target>
 </Project>

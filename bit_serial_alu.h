@@ -31,6 +31,11 @@ public:
     static uint64_t addBits(uint64_t a, uint64_t b);
     static uint64_t subBits(uint64_t a, uint64_t b);
 
+    // The same product as the stepwise Mul phase, restructured so that the
+    // partial products are independent and can be computed by several
+    // threads. Bit for bit identical to the sequential result.
+    static uint64_t mulBitsParallel(uint64_t a, uint64_t b);
+
 private:
     void stepAdd();
     void stepNegate();

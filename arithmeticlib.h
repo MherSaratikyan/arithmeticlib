@@ -99,6 +99,13 @@ ARITHMETICLIB_API uint64_t arith_sub_bits(uint64_t a, uint64_t b);
 ARITHMETICLIB_API uint64_t arith_mul_bits(uint64_t a, uint64_t b);
 ARITHMETICLIB_API uint64_t arith_div_bits(uint64_t a, uint64_t b);
 
+/* The multiplication with its partial products computed in parallel instead
+   of accumulated in sequence. Bit for bit identical to arith_mul_bits for
+   every input and thread count. There is no arith_div_bits_parallel: the
+   restoring division carries a remainder from one quotient bit to the next,
+   so its loop has no independent iterations to hand out. */
+ARITHMETICLIB_API uint64_t arith_mul_bits_parallel(uint64_t a, uint64_t b);
+
 /* --- Batch operations ----------------------------------------------------
    Element i is computed from a[i] and b[i] only, so these are split across
    OpenMP threads. The result of each element is independent of how the work

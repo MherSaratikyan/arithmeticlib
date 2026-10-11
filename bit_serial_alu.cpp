@@ -18,6 +18,42 @@ uint64_t BitSerialAlu::subBits(uint64_t a, uint64_t b)
     return addBits(a, addBits(~b, 1));
 }
 
+// The sequential MulBits loop cannot be split as it stands: `result` is an
+// accumulator and `a` and `b` are shifted on every iteration, so iteration i
+// needs what iteration i-1 produced. The product does not require that
+// though - partial product i is just (a << i) when bit i of b is set, which
+// depends on nothing but the original operands:
+//
+//     result = sum over i of ((b >> i) & 1) * (a << i)
+//
+// Those 64 partials are independent, and wrap-around addition is associative
+// and commutative, so they can be summed in any order: the result is bit for
+// bit identical whatever the schedule or the thread count.
+//
+// MSVC's /openmp is OpenMP 2.0, which has no user-defined reductions, so
+// each thread sums its own partials privately and the merge happens in a
+// critical section. Every addition is still AddBits - no native `+` is used.
+uint64_t BitSerialAlu::mulBitsParallel(uint64_t a, uint64_t b)
+{
+    uint64_t total = 0;
+
+#pragma omp parallel
+    {
+        uint64_t local = 0;
+
+#pragma omp for schedule(static) nowait
+        for (int i = 0; i < 64; ++i) {
+            if ((b >> i) & 1)
+                local = addBits(local, a << i);
+        }
+
+#pragma omp critical(arith_mul_bits_parallel)
+        total = addBits(total, local);
+    }
+
+    return total;
+}
+
 void BitSerialAlu::begin(Op op, uint64_t a, uint64_t b)
 {
     result_    = 0;

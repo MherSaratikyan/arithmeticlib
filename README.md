@@ -17,7 +17,7 @@ arithmeticlib/
 │   └── bit_serial_alu.h/.cpp     AddBits/SubBits/MulBits/DivBits as a clocked sub-machine
 ├── tests/                        console test runner (no external dependencies)
 │   ├── reference.h               transliterated C# module + sign rules = the oracle
-│   └── test_*.cpp                68 tests
+│   └── test_*.cpp                71 tests
 └── client/                       console client: one-shot results and cycle-by-cycle traces
 ```
 
@@ -96,8 +96,10 @@ float arith_compute(ArithOp op, float a, float b);
 // integer primitives (run to completion)
 uint64_t arith_add_bits(uint64_t a, uint64_t b);   // also sub/mul/div
 
-// batches, split across OpenMP threads (see Parallelism)
+// batches, split across OpenMP threads; and the multiply with its partial
+// products summed in parallel (see Parallelism)
 void arith_compute_array(ArithOp op, const float* a, const float* b, float* out, size_t n);
+uint64_t arith_mul_bits_parallel(uint64_t a, uint64_t b);
 
 // stepwise
 ArithMachine* m = arith_machine_create(ARITH_OP_DIV, -1.0f, 3.0f);
@@ -121,17 +123,14 @@ static extern float arith_divide(float a, float b);
 
 ## Parallelism
 
-The bit-serial cycles cannot be parallelised: each one consumes the registers
-the one before it produced. A carry ripple needs the previous carry, `MulBits`
-accumulates into a running product, and restoring division carries a remainder
-from bit to bit. `#pragma omp parallel for` on any of those loops gives wrong
-answers, and `#pragma omp parallel` around a single operation only makes every
-thread compute the same result. (Parallel adders do exist — carry-lookahead,
-carry-select — but they are a different algorithm, not a directive on this
-one.)
+Two levels, and they are worth keeping apart: **across operations**, which is
+what makes the library faster, and **inside one operation**, where only the
+multiplication has independent work to hand out.
 
-What *is* independent is one operation from the next, so that is where OpenMP
-goes. The batch entry points walk their arrays under
+### Across operations
+
+One operation does not depend on the next, so the batch entry points walk
+their arrays under
 
 ```c
 #pragma omp parallel for schedule(static) if (count >= threshold)
@@ -180,6 +179,98 @@ all — the batch functions work either way.
 ```
 
 Division is the slowest operation (64 ALU cycles per value) and scales best.
+
+### Inside one operation
+
+The bit-serial loops are written as recurrences: each iteration consumes what
+the one before it produced, so `#pragma omp parallel for` on them as they
+stand gives wrong answers, and `#pragma omp parallel` around a whole operation
+just makes every thread compute the same result.
+
+**Multiplication can be rewritten so that it does have independent work.**
+The sequential form accumulates, which is what blocks it:
+
+```c
+while (b != 0) {                         // iteration i needs result, a and b
+    if (b & 1) result = AddBits(result, a);   //   as iteration i-1 left them
+    a <<= 1;
+    b >>= 1;
+}
+```
+
+but the product it computes does not need that ordering — partial product `i`
+is `a << i` whenever bit `i` of `b` is set, which depends on nothing but the
+original operands:
+
+```
+result = sum over i of ((b >> i) & 1) * (a << i)
+```
+
+`arith_mul_bits_parallel` sums those 64 independent partials with threads.
+Wrap-around addition is associative and commutative, so the schedule cannot
+change the answer, and every addition is still `AddBits` — each thread
+accumulates privately and merges in a critical section, because MSVC's
+`/openmp` is OpenMP 2.0 and has no user-defined reductions:
+
+```c
+#pragma omp parallel
+{
+    uint64_t local = 0;
+#pragma omp for schedule(static) nowait
+    for (int i = 0; i < 64; ++i)
+        if ((b >> i) & 1)
+            local = addBits(local, a << i);
+#pragma omp critical(arith_mul_bits_parallel)
+    total = addBits(total, local);
+}
+```
+
+It is bit for bit identical to `arith_mul_bits` on every input and thread
+count, which `test_parallel.cpp` checks over edge cases and 20 000 random
+pairs. It is also, measured with `--bench-mul`, *slower*:
+
+```
+  mul_bits over 200000 values, OpenMP on
+    sequential shift-and-add     :   240.822 ms
+    parallel partials,  1 thread :   205.131 ms
+    parallel partials,  8 threads:  1009.826 ms
+    results                      : identical, bit for bit
+    one multiplication is ~1204 ns of work
+```
+
+One multiplication is around a microsecond of work, and forming a thread team
+plus a barrier and a critical section per multiplication costs several times
+that — so eight threads come out four times *behind* the plain loop. The
+restructuring itself is roughly free: on one thread it runs a little ahead of
+the sequential loop in the x64 build above and a little behind it in x86,
+since it stops shifting `a` and `b` every iteration but always walks all 64
+bit positions. It is the thread team that is expensive. Reach for it when a
+single multiplication is the whole program; for anything else use the batch
+API, where the same threads have real work to divide.
+
+**Division cannot be rewritten that way.** Restoring division is a digit
+recurrence: the remainder entering step `i` is produced by step `i+1`, and
+there is no closed form for it that skips the earlier steps.
+
+```c
+for (int i = 63; i >= 0; i--) {
+    remainder <<= 1;                      // carried from the previous step
+    remainder |= (a >> i) & 1;
+    if (remainder >= b) {                 // and the quotient bit depends on it
+        remainder = SubBits(remainder, b);
+        result |= 1ULL << i;
+    }
+}
+```
+
+Every iteration both reads and writes `remainder`, so the 64 iterations have
+to happen in order — there is no `arith_div_bits_parallel`, and a directive on
+this loop would simply produce a wrong quotient. Parallel division algorithms
+do exist (Newton–Raphson or Goldschmidt on a reciprocal, SRT at higher radix),
+but they are different algorithms with their own rounding behaviour, not this
+one with a pragma on it. Divisions are parallelised across elements instead,
+by the batch API above — which is where division happens to scale best of the
+four operations.
 
 **Runtime dependency:** `/openmp` makes the DLL need `vcomp140.dll`
 (`vcomp140d.dll` in a debug build), part of the Visual C++ redistributable and
@@ -268,7 +359,7 @@ fine and any failure is in your own project's settings.
 ## Tests
 
 ```bat
-bin\x64\Release\arithmeticlib.tests.exe            # all 68 tests
+bin\x64\Release\arithmeticlib.tests.exe            # all 71 tests
 bin\x64\Release\arithmeticlib.tests.exe sign       # only tests whose name contains "sign"
 ```
 
@@ -289,9 +380,10 @@ The suite checks five things:
   divide, 2 for a trivial result), ALU phases (`Negate` then `Add` for a
   magnitude subtraction), the sign and `mag_op` registers, reset, stepping
   past `Done`, null handles.
-* **Batches** – results identical to the scalar functions above and below the
+* **Batches and parallelism** – batch results identical to the scalar functions above and below the
   parallel threshold and across thread counts, in-place updates, the `n == 0`
-  and NULL cases, and the OpenMP runtime hooks.
+  and NULL cases, the OpenMP runtime hooks, and `arith_mul_bits_parallel`
+  against the sequential multiply over edge cases and random pairs.
 
 Exit code is 0 when everything passes.
 

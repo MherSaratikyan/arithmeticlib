@@ -194,6 +194,81 @@ TEST(batches_ignore_empty_and_null_arguments)
     CHECK_FLOAT_BITS(out[3], 12.f);
 }
 
+// Parallelism inside a single multiplication: the partial products are
+// independent, so they can be summed by several threads. The answer must not
+// move - not for edge cases, not for a different thread count.
+TEST(the_parallel_multiply_matches_the_sequential_one)
+{
+    const uint64_t edges[] = {
+        0, 1, 2, 3, 7, 0xFF, 0x800000, 0xC00000, 0xFFFFFF,
+        0xDEADBEEFull, 0xCAFEBABEull, 0x123456789ABCDEF0ull,
+        1ull << 23, 1ull << 31, 1ull << 47, 1ull << 63, ~0ull, ~0ull - 1,
+    };
+    for (uint64_t a : edges)
+        for (uint64_t b : edges) {
+            CHECK_EQ(arith_mul_bits_parallel(a, b), arith_mul_bits(a, b));
+            CHECK_EQ(arith_mul_bits_parallel(a, b), a * b);   // also still the real product
+        }
+
+    testutil::Rng rng(51);
+    size_t mismatches = 0;
+    for (int i = 0; i < 20000; ++i) {
+        const uint64_t a = rng.next();
+        const uint64_t b = rng.next() >> rng.between(0, 63);
+        if (arith_mul_bits_parallel(a, b) != arith_mul_bits(a, b))
+            ++mismatches;
+    }
+    CHECK_EQ(mismatches, static_cast<size_t>(0));
+}
+
+TEST(the_parallel_multiply_is_independent_of_the_thread_count)
+{
+    testutil::Rng rng(52);
+    std::vector<uint64_t> a(500), b(500);
+    for (size_t i = 0; i < a.size(); ++i) {
+        a[i] = rng.next();
+        b[i] = rng.next();
+    }
+
+    const int threads = arith_parallel_threads();
+    std::vector<uint64_t> oneThread(a.size()), manyThreads(a.size());
+
+    arith_parallel_set_threads(1);
+    for (size_t i = 0; i < a.size(); ++i)
+        oneThread[i] = arith_mul_bits_parallel(a[i], b[i]);
+
+    arith_parallel_set_threads(threads > 1 ? threads : 4);
+    for (size_t i = 0; i < a.size(); ++i)
+        manyThreads[i] = arith_mul_bits_parallel(a[i], b[i]);
+
+    arith_parallel_set_threads(0);
+
+    size_t mismatches = 0;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (oneThread[i] != manyThreads[i] || oneThread[i] != a[i] * b[i])
+            ++mismatches;
+    CHECK_EQ(mismatches, static_cast<size_t>(0));
+}
+
+TEST(the_parallel_multiply_works_inside_a_batch)
+{
+    // Nested parallelism is off by default, so the inner region runs on one
+    // thread. It still has to give the same answer.
+    testutil::Rng rng(53);
+    const size_t n = arith_parallel_threshold() * 2;
+    const std::vector<uint64_t> a = randomBits(rng, n);
+    const std::vector<uint64_t> b = randomBits(rng, n);
+    std::vector<uint64_t> out(n);
+
+    arith_bits_array(ARITH_OP_MUL, a.data(), b.data(), out.data(), n);
+
+    size_t mismatches = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (out[i] != arith_mul_bits_parallel(a[i], b[i]))
+            ++mismatches;
+    CHECK_EQ(mismatches, static_cast<size_t>(0));
+}
+
 TEST(the_parallel_runtime_reports_itself)
 {
     // The projects build with /openmp; this fails if that gets turned off.

@@ -221,29 +221,83 @@ void printBench(ArithOp op, size_t n)
                                 : "DIFFER - the batch is not deterministic");
 }
 
+// Times the two multiplication loops against each other: the sequential
+// shift-and-add, and the one whose partial products are summed in parallel.
+void printMulBench(size_t n)
+{
+    std::printf("  mul_bits over %zu values, OpenMP %s\n", n,
+                arith_parallel_available() ? "on" : "off (built without /openmp)");
+
+    std::vector<uint64_t> a(n), b(n);
+    uint64_t state = 0x9E3779B97F4A7C15ull;
+    for (size_t i = 0; i < n; ++i) {
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17; a[i] = state;
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17; b[i] = state;
+    }
+
+    const int threads = arith_parallel_threads();
+    uint64_t sumSeq = 0, sumOne = 0, sumAll = 0;
+
+    const double t0 = seconds();
+    for (size_t i = 0; i < n; ++i)
+        sumSeq ^= arith_mul_bits(a[i], b[i]);
+    const double sequential = seconds() - t0;
+
+    arith_parallel_set_threads(1);
+    const double t1 = seconds();
+    for (size_t i = 0; i < n; ++i)
+        sumOne ^= arith_mul_bits_parallel(a[i], b[i]);
+    const double partialsOne = seconds() - t1;
+
+    arith_parallel_set_threads(threads);
+    const double t2 = seconds();
+    for (size_t i = 0; i < n; ++i)
+        sumAll ^= arith_mul_bits_parallel(a[i], b[i]);
+    const double partialsAll = seconds() - t2;
+
+    std::printf("    sequential shift-and-add     : %9.3f ms\n", sequential * 1000.0);
+    std::printf("    parallel partials,  1 thread : %9.3f ms\n", partialsOne * 1000.0);
+    std::printf("    parallel partials, %2d threads: %9.3f ms\n", threads, partialsAll * 1000.0);
+    std::printf("    results                      : %s\n",
+                (sumSeq == sumOne && sumOne == sumAll) ? "identical, bit for bit"
+                                                       : "DIFFER - not deterministic");
+    std::printf("    one multiplication is ~%.0f ns of work\n", sequential / n * 1e9);
+}
+
 void usage()
 {
     std::printf("usage: arithmeticlib.client [--trace] <a> <+|-|*|/> <b>\n"
-                "       arithmeticlib.client --bench [count] [op]\n"
+                "       arithmeticlib.client --bench [count] [op]   (batch, across operations)\n"
+                "       arithmeticlib.client --bench-mul [count]    (inside one multiplication)\n"
                 "       arithmeticlib.client            (interactive)\n");
 }
 
-// Handles "--bench [count] [op]"; returns false if this is not a bench request.
+// Handles "--bench [count] [op]" and "--bench-mul [count]"; returns false if
+// this is not a bench request.
 bool tryBench(int argc, char** argv)
 {
-    if (argc < 2 || std::strcmp(argv[1], "--bench") != 0)
+    if (argc < 2)
+        return false;
+    const bool batch     = std::strcmp(argv[1], "--bench") == 0;
+    const bool primitive = std::strcmp(argv[1], "--bench-mul") == 0;
+    if (!batch && !primitive)
         return false;
 
-    size_t n = 2000000;
-    ArithOp op = ARITH_OP_MUL;
+    size_t n = batch ? 2000000 : 200000;
     if (argc > 2) {
         const long long requested = std::atoll(argv[2]);
         if (requested > 0)
             n = static_cast<size_t>(requested);
     }
+
+    if (primitive) {
+        printMulBench(n);
+        return true;
+    }
+
+    ArithOp op = ARITH_OP_MUL;
     if (argc > 3)
         parseOp(argv[3], op);
-
     printBench(op, n);
     return true;
 }

@@ -114,6 +114,11 @@ uint64_t arith_sub_bits(uint64_t a, uint64_t b) { return runAlu(BitSerialAlu::Op
 uint64_t arith_mul_bits(uint64_t a, uint64_t b) { return runAlu(BitSerialAlu::Op::Mul, a, b); }
 uint64_t arith_div_bits(uint64_t a, uint64_t b) { return runAlu(BitSerialAlu::Op::Div, a, b); }
 
+uint64_t arith_mul_bits_parallel(uint64_t a, uint64_t b)
+{
+    return BitSerialAlu::mulBitsParallel(a, b);
+}
+
 /* --- Batch operations ---------------------------------------------------- */
 
 void arith_compute_array(ArithOp op, const float* a, const float* b, float* out, size_t n)
